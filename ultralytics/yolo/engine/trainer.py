@@ -41,69 +41,71 @@ class BaseTrainer:
     A base class for creating trainers.
 
     Attributes:
-        args (SimpleNamespace): Configuration for the trainer.
-        check_resume (method): Method to check if training should be resumed from a saved checkpoint.
-        validator (BaseValidator): Validator instance.
-        model (nn.Module): Model instance.
-        callbacks (defaultdict): Dictionary of callbacks.
-        save_dir (Path): Directory to save results.
-        wdir (Path): Directory to save weights.
-        last (Path): Path to last checkpoint.
-        best (Path): Path to best checkpoint.
-        save_period (int): Save checkpoint every x epochs (disabled if < 1).
-        batch_size (int): Batch size for training.
-        epochs (int): Number of epochs to train for.
-        start_epoch (int): Starting epoch for training.
-        device (torch.device): Device to use for training.
-        amp (bool): Flag to enable AMP (Automatic Mixed Precision).
-        scaler (amp.GradScaler): Gradient scaler for AMP.
-        data (str): Path to data.
-        trainset (torch.utils.data.Dataset): Training dataset.
-        testset (torch.utils.data.Dataset): Testing dataset.
-        ema (nn.Module): EMA (Exponential Moving Average) of the model.
-        lf (nn.Module): Loss function.
-        scheduler (torch.optim.lr_scheduler._LRScheduler): Learning rate scheduler.
-        best_fitness (float): The best fitness value achieved.
-        fitness (float): Current fitness value.
-        loss (float): Current loss value.
-        tloss (float): Total loss value.
-        loss_names (list): List of loss names.
-        csv (Path): Path to results CSV file.
+        args (SimpleNamespace): 训练的参数配置.
+        check_resume (method): 检查是否需要从已保存的权重恢复训练的方法
+        validator (BaseValidator): 模型效果评估器.
+        model (nn.Module): 模型实例.
+        callbacks (defaultdict): 训练回调函数.
+        save_dir (Path): 保存训练结果的文件夹.
+        wdir (Path): 保存权重的文件夹 Directory to save weights.
+        last (Path): 保存最后一个epoch权重的路径 Path to last checkpoint.
+        best (Path): 保存最优epoch权重的路径Path to best checkpoint.
+        save_period (int): 每x个epoch保存一次权重，x > 1.
+        batch_size (int): 训练的Batch size.
+        epochs (int): 训练的epoch.
+        start_epoch (int): 从第x个epoch开始训练.
+        device (torch.device): 用以训练的设备.
+        amp (bool): 是否进行自动精度混合 Flag to enable AMP (Automatic Mixed Precision).
+        scaler (amp.GradScaler): 用以自动混合精度的梯度缩放器 Gradient scaler for AMP.
+        data (str): 训练数据的路径 Path to data.
+        trainset (torch.utils.data.Dataset): 训练数据集 Training dataset.
+        testset (torch.utils.data.Dataset): 特使数据集 Testing dataset.
+        ema (nn.Module): 模型权重的指数移动平均 EMA (Exponential Moving Average) of the model.
+        lf (nn.Module): 损失函数 Loss function.
+        scheduler (torch.optim.lr_scheduler._LRScheduler): 学习率调度器 Learning rate scheduler.
+        best_fitness (float): 已完成的训练中最好的fitness The best fitness value achieved.
+        fitness (float): 当前的fitness值 Current fitness value.
+        loss (float): 当前的损失值 Current loss value.
+        tloss (float): 总的损失值 Total loss value.
+        loss_names (list): 训练过程计算出的所有的loss名称的列表(包括cls_loss, bos_loss, obj_loss).
+        csv (Path): 保存训练过程的csv文件 Path to results CSV file.
     """
 
     def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None):
         """
-        Initializes the BaseTrainer class.
+        BaseTrainer初始化函数
 
         Args:
             cfg (str, optional): Path to a configuration file. Defaults to DEFAULT_CFG.
             overrides (dict, optional): Configuration overrides. Defaults to None.
         """
-        self.args = get_cfg(cfg, overrides)
+        self.args = get_cfg(cfg, overrides)  # 加载参数
         self.device = select_device(self.args.device, self.args.batch)
         self.check_resume()
         self.validator = None
         self.model = None
         self.metrics = None
         self.plots = {}
-        init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
+        init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)  # 初始化随机种子
 
-        # Dirs
-        project = self.args.project or Path(SETTINGS['runs_dir']) / self.args.task
-        name = self.args.name or f'{self.args.mode}'
-        if hasattr(self.args, 'save_dir'):
+        # 设置保存目录和模型保存路径
+        project = self.args.project or Path(SETTINGS['runs_dir']) / self.args.task  # 用户定义的项目目录
+        name = self.args.name or f'{self.args.mode}'  # 用户定义的该次运行名称
+
+        if hasattr(self.args, 'save_dir'):  # 如果用户已定义了save_dir则直接使用
             self.save_dir = Path(self.args.save_dir)
-        else:
+        else:  # 否则根据project、name以递增的方式(例如: detect1, detect2, ...)构建出save_dir
             self.save_dir = Path(
                 increment_path(Path(project) / name, exist_ok=self.args.exist_ok if RANK in (-1, 0) else True))
-        self.wdir = self.save_dir / 'weights'  # weights dir
+        self.wdir = self.save_dir / 'weights'  # 权重文件保存文件夹
         if RANK in (-1, 0):
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
-            yaml_save(self.save_dir / 'args.yaml', vars(self.args))  # save run args
-        self.last, self.best = self.wdir / 'last.pt', self.wdir / 'best.pt'  # checkpoint paths
+            yaml_save(self.save_dir / 'args.yaml', vars(self.args))  # 保存训练参数
+        self.last, self.best = self.wdir / 'last.pt', self.wdir / 'best.pt'  # 权重保存路径
         self.save_period = self.args.save_period
 
+        # 初始化epoch部分参数
         self.batch_size = self.args.batch
         self.epochs = self.args.epochs
         self.start_epoch = 0
@@ -112,10 +114,17 @@ class BaseTrainer:
 
         # Device
         if self.device.type == 'cpu':
-            self.args.workers = 0  # faster CPU training as time dominated by inference, not dataloading
+            self.args.workers = 0  # 在CPU环境下,使用单进程数据加载会更快,不需要额外的workers
 
         # Model and Dataset
         self.model = self.args.model
+        # 根据任务类型调用检查函数:
+        # ==============================================================================================================
+        # 校验数据集路径是否存在, 如果是yaml文件,将解析并返回dataset字典
+        # 获取解析后的dataset,更新到self.data,
+        # 解析后的dataset信息, 包含yaml_file: 原始yaml路径， train/val/test路径等
+        # 如果dataset不合法, 会raise一个异常
+        # ==============================================================================================================
         try:
             if self.args.task == 'classify':
                 self.data = check_cls_dataset(self.args.data)
@@ -126,14 +135,19 @@ class BaseTrainer:
         except Exception as e:
             raise RuntimeError(emojis(f"Dataset '{clean_url(self.args.data)}' error ❌ {e}")) from e
 
+        # 从self.data中获取训练集和测试集的数据
+        # ==============================================================================================================
+        # 将data字典抽象为数据集对象,方便后续统一地训练、验证不同的数据集
+        # get_dataset需要子类实现,将data解析成针对特定任务的训练集、测试集
+        # ==============================================================================================================
         self.trainset, self.testset = self.get_dataset(self.data)
         self.ema = None
 
-        # Optimization utils init
+        # 优化器部分初始化
         self.lf = None
         self.scheduler = None
 
-        # Epoch level metrics
+        # Epoch层级的metrics指标
         self.best_fitness = None
         self.fitness = None
         self.loss = None
@@ -142,9 +156,16 @@ class BaseTrainer:
         self.csv = self.save_dir / 'results.csv'
         self.plot_idx = [0, 1, 2]
 
-        # Callbacks
-        self.callbacks = _callbacks or callbacks.get_default_callbacks()
-        if RANK in (-1, 0):
+        # 回调函数
+        # ==============================================================================================================
+        # 回调函数在训练循环中的不同时期被调用,以实现辅助操作。
+        #
+        # 默认回调函数提供基础功能,如EarlyStopping、ModelCheckpoint等。而集成回调函数在主进程中被添加,进行日志记录、
+        # 结果写入等辅助工作。这样可以方便地使用回调函数来增强训练循环,而不需要直接修改循环内代码。通过回调函数可以扩展Trainer的功能,
+        # 而不影响核心训练逻辑。
+        # ==============================================================================================================
+        self.callbacks = _callbacks or callbacks.get_default_callbacks()  # 获取默认回调函数组
+        if RANK in (-1, 0):  # 如果是主进程(单卡训练或多卡训练中rank=0的进程),添加集成回调函数
             callbacks.add_integration_callbacks(self)
 
     def add_callback(self, event: str, callback):
@@ -165,7 +186,11 @@ class BaseTrainer:
             callback(self)
 
     def train(self):
-        """Allow device='', device=None on Multi-GPU systems to default to device=0."""
+        """
+        训练循环的主要函数
+        Allow device='', device=None on Multi-GPU systems to default to device=0.
+        """
+        # 1. 计算可工作的GPU数量(world_size)
         if isinstance(self.args.device, int) or self.args.device:  # i.e. device=0 or device=[0,1,2,3]
             world_size = torch.cuda.device_count()
         elif torch.cuda.is_available():  # i.e. device=None or device=''
@@ -173,7 +198,7 @@ class BaseTrainer:
         else:  # i.e. device='cpu' or 'mps'
             world_size = 0
 
-        # Run subprocess if DDP training, else train normally
+        # 2. 判断是否需要分布式训练
         if world_size > 1 and 'LOCAL_RANK' not in os.environ:
             # Argument checks
             if self.args.rect:
@@ -188,7 +213,7 @@ class BaseTrainer:
                 raise e
             finally:
                 ddp_cleanup(self, str(file))
-        else:
+        else:  # 不需要分布式训练，进行普通训练
             self._do_train(world_size)
 
     def _setup_ddp(self, world_size):
@@ -205,18 +230,19 @@ class BaseTrainer:
 
     def _setup_train(self, world_size):
         """
-        Builds dataloaders and optimizer on correct rank process.
+        训练初始化的关键函数，完成训练中需要的各组件的构建和初始化
         """
-        # Model
+        # 1. 构建模型
         self.run_callbacks('on_pretrain_routine_start')
-        ckpt = self.setup_model()
-        self.model = self.model.to(self.device)
+        ckpt = self.setup_model()  # 加载或构建模型
+        self.model = self.model.to(self.device)  # 将模型放到设备上(CPU/GPU)
         self.set_model_attributes()
-        # Check AMP
-        self.amp = torch.tensor(self.args.amp).to(self.device)  # True or False
+
+        # 2. 初始化AMP
+        self.amp = torch.tensor(self.args.amp).to(self.device)  # 根据args判断是否使用AMP
         if self.amp and RANK in (-1, 0):  # Single-GPU and DDP
             callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
-            self.amp = torch.tensor(check_amp(self.model), device=self.device)
+            self.amp = torch.tensor(check_amp(self.model), device=self.device)  # 检查和初始化AMP
             callbacks.default_callbacks = callbacks_backup  # restore callbacks
         if RANK > -1 and world_size > 1:  # DDP
             dist.broadcast(self.amp, src=0)  # broadcast the tensor from rank 0 to all other ranks (returns None)
@@ -224,19 +250,22 @@ class BaseTrainer:
         self.scaler = amp.GradScaler(enabled=self.amp)
         if world_size > 1:
             self.model = DDP(self.model, device_ids=[RANK])
-        # Check imgsz
-        gs = max(int(self.model.stride.max() if hasattr(self.model, 'stride') else 32), 32)  # grid size (max stride)
-        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
-        # Batch size
+
+        # 3. 设置图片大小
+        gs = max(int(self.model.stride.max() if hasattr(self.model, 'stride') else 32), 32)  # 计算模型最大步幅(grid size)
+        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)  # 检查输入图片大小是否可行
+
+        # 4. 设置Batch size
         if self.batch_size == -1:
-            if RANK == -1:  # single-GPU only, estimate best batch size
+            if RANK == -1:  # 如果为auto batch,在单GPU下自动选择合适的batch size
                 self.args.batch = self.batch_size = check_train_batch_size(self.model, self.args.imgsz, self.amp)
             else:
                 SyntaxError('batch=-1 to use AutoBatch is only available in Single-GPU training. '
                             'Please pass a valid batch size value for Multi-GPU DDP training, i.e. batch=16')
 
-        # Dataloaders
+        # 5. 构建数据集的Dataloaders
         batch_size = self.batch_size // max(world_size, 1)
+        # 调用get_dataloader()构建训练集和验证集的dataloader
         self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=RANK, mode='train')
         if RANK in (-1, 0):
             self.test_loader = self.get_dataloader(self.testset, batch_size=batch_size * 2, rank=-1, mode='val')
@@ -247,7 +276,7 @@ class BaseTrainer:
             if self.args.plots and not self.args.v5loader:
                 self.plot_training_labels()
 
-        # Optimizer
+        # 6. 构建优化器(Optimizer)
         self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
         weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
         iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
@@ -257,49 +286,79 @@ class BaseTrainer:
                                               momentum=self.args.momentum,
                                               decay=weight_decay,
                                               iterations=iterations)
-        # Scheduler
+
+        # 7. 构建学习率调度器 Scheduler: 创建学习率调度策略(余弦退火或线性衰减)
         if self.args.cos_lr:
             self.lf = one_cycle(1, self.args.lrf, self.epochs)  # cosine 1->hyp['lrf']
         else:
             self.lf = lambda x: (1 - x / self.epochs) * (1.0 - self.args.lrf) + self.args.lrf  # linear
         self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=self.lf)
+
+        # 8. 初始化Early Stopping
         self.stopper, self.stop = EarlyStopping(patience=self.args.patience), False
+
+        # 9. 恢复训练:从之前的检查点恢复训练
         self.resume_training(ckpt)
         self.scheduler.last_epoch = self.start_epoch - 1  # do not move
+
         self.run_callbacks('on_pretrain_routine_end')
 
     def _do_train(self, world_size=1):
-        """Train completed, evaluate and plot if specified by arguments."""
+        """
+        完成训练、评估、绘制指标图, 是组织训练流程的核心函数
+        """
         if world_size > 1:
             self._setup_ddp(world_size)
 
+        # 训练组件的初始化
         self._setup_train(world_size)
 
         self.epoch_time = None
         self.epoch_time_start = time.time()
         self.train_time_start = time.time()
-        nb = len(self.train_loader)  # number of batches
+
+        nb = len(self.train_loader)  # batch的数量(number of batches)
         nw = max(round(self.args.warmup_epochs *
-                       nb), 100) if self.args.warmup_epochs > 0 else -1  # number of warmup iterations
+                       nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup的总迭代数(number of warmup iterations)
+
         last_opt_step = -1
         self.run_callbacks('on_train_start')
         LOGGER.info(f'Image sizes {self.args.imgsz} train, {self.args.imgsz} val\n'
                     f'Using {self.train_loader.num_workers * (world_size or 1)} dataloader workers\n'
                     f"Logging results to {colorstr('bold', self.save_dir)}\n"
                     f'Starting training for {self.epochs} epochs...')
+
+        # 控制在训练过程中何时关闭 mosaic 数据增强
+        # ============================================[mosaic 数据增强]==================================================
+        #   mosaic数据增强是YOLO训练常用的一种技巧, 可以增强模型的泛化能力。它的基本思路是:
+        #       1. 随机从数据集中取出4张图片
+        #       2. 在一张大图中拼接这4张图片
+        #       3. 在拼接图像上进行目标检测训练
+        #
+        #   这可以让模型看到更多样化的样本, 避免过拟合。 但是过度使用mosaic也会使训练难以收敛, 且Inference时模型不会看到
+        #   mosaic过的图像，所以一般在训练中期(如最后10个epochs)会关闭mosaic, 只保留常规的数据增强, 让模型专注正常图像的训练。
+        # ==============================================================================================================
         if self.args.close_mosaic:
             base_idx = (self.epochs - self.args.close_mosaic) * nb
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
+
+        # 处理恢复已完成训练的模型的边界情况
+        # ==============================================================================================================
+        #   因为后面会在循环中对epoch计数,当恢复一个已full train的模型时,start_epoch可能等于self.epochs,
+        #   如果不预定义epoch,会导致这个循环直接退出,训练流程不完整。
+        # ==============================================================================================================
         epoch = self.epochs  # predefine for resume fully trained model edge cases
+
+        # 开始训练循环
         for epoch in range(self.start_epoch, self.epochs):
             self.epoch = epoch
             self.run_callbacks('on_train_epoch_start')
-            self.model.train()
+            self.model.train()  # 将PyTorch模型设置为训练模式
             if RANK != -1:
                 self.train_loader.sampler.set_epoch(epoch)
             pbar = enumerate(self.train_loader)
             # Update dataloader attributes (optional)
-            if epoch == (self.epochs - self.args.close_mosaic):
+            if epoch == (self.epochs - self.args.close_mosaic):  # 当epoch达到 总计数 - close_mosaic 的时刻,就会关闭mosaic
                 LOGGER.info('Closing dataloader mosaic')
                 if hasattr(self.train_loader.dataset, 'mosaic'):
                     self.train_loader.dataset.mosaic = False
@@ -312,9 +371,9 @@ class BaseTrainer:
                 pbar = tqdm(enumerate(self.train_loader), total=nb, bar_format=TQDM_BAR_FORMAT)
             self.tloss = None
             self.optimizer.zero_grad()
-            for i, batch in pbar:
+            for i, batch in pbar:  # 单个batch训练开始
                 self.run_callbacks('on_train_batch_start')
-                # Warmup
+                # Warmup：当迭代数ni在nw内时,会通过线性插值的方式逐步增大学习率,从一个较小值warmup到指定的学习率
                 ni = i + nb * epoch
                 if ni <= nw:
                     xi = [0, nw]  # x interp
@@ -326,24 +385,38 @@ class BaseTrainer:
                         if 'momentum' in x:
                             x['momentum'] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
-                # Forward
-                with torch.cuda.amp.autocast(self.amp):
-                    batch = self.preprocess_batch(batch)
-                    self.loss, self.loss_items = self.model(batch)
-                    if RANK != -1:
+                # 前向推理(Forward)
+                with torch.cuda.amp.autocast(self.amp):  # 使用自动混合精度(AMP)进行模型的前向计算
+                    batch = self.preprocess_batch(batch)  # 对一个batch数据进行预处理
+                    self.loss, self.loss_items = self.model(batch)  # 模型前向计算,返回loss和各个损失项
+                    if RANK != -1:  # 在分布式训练下对loss进行缩放, 为了在reduce时可以正确聚合结果
                         self.loss *= world_size
+                    # 计算正在变化的平均loss
+                    # ==================================================================================================
+                    # 取前i步的mean loss 和 当前step的loss做平均， 如果self.tloss为空则直接取当前loss
+                    # 这是模型训练中常见的一些技巧,可以加速训练,同时让loss曲线更平滑。
+                    # ==================================================================================================
                     self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
                         else self.loss_items
 
-                # Backward
+                # 反向推理(Backward)
                 self.scaler.scale(self.loss).backward()
 
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
-                if ni - last_opt_step >= self.accumulate:
-                    self.optimizer_step()
-                    last_opt_step = ni
+                # 通过梯度累积来实现更大的batch size
+                # ======================================================================================================
+                # 主要逻辑是：
+                #   不是每次迭代就更新权重,而是累积一定步数的梯度后再做更新。这在显存不足以支持非常大的batch size时很有用。
+                # 例如:
+                #   每次迭代的batch size是b,但希望的batch size是B(B大于显卡容量), 设置self.accumulate = B // b,
+                #   比如B是256,b是64,那么accumulate=4, 就可以每4次迭代累积一次梯度,来模拟B=256的batch size进行更新
+                # 通过梯度累积来实现更大的batch size,是一种常用的工程技巧
+                # ======================================================================================================
+                if ni - last_opt_step >= self.accumulate:  # self.accumulate: 累积梯度的次数,默认为1
+                    self.optimizer_step()  # 进行优化器更新,利用累积的梯度来更新权重
+                    last_opt_step = ni  # 更新last_opt_step = ni,代表已优化过
 
-                # Log
+                # 日志记录Log
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
                 loss_len = self.tloss.shape[0] if len(self.tloss.size()) else 1
                 losses = self.tloss if loss_len > 1 else torch.unsqueeze(self.tloss, 0)
@@ -355,25 +428,47 @@ class BaseTrainer:
                     if self.args.plots and ni in self.plot_idx:
                         self.plot_training_samples(batch, ni)
 
+                # 执行batch训练结束回调
                 self.run_callbacks('on_train_batch_end')
 
             self.lr = {f'lr/pg{ir}': x['lr'] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
 
+            # 按预定策略调整学习率,帮助模型训练
             self.scheduler.step()
+
+            # 执行epoch训练结束回调
             self.run_callbacks('on_train_epoch_end')
 
             if RANK in (-1, 0):
 
                 # Validation
+                # 使用了EMA(指数移动平均)来保存模型的一些属性,其中主要作用是保存模型的yaml配置
+                # ======================================================================================================
+                # 用EMA更新模型的一些属性值,这些属性在验证和保存模型时会用到
+                # 主要有:
+                # - yaml: 模型的配置文件
+                # - nc: 类别数
+                # - args: 模型的训练参数
+                # - names: 类别名称
+                # - stride: 模型的各层步幅
+                # - class_weights: 各类别的 LOSS 权重
+                # 之所以要更新这些属性,是因为训练中我们可能会修改模型结构,如更改类别数,这会改变模型实例的 nc 值。
+                # 但是我们希望保存的模型和当前模型结构尽可能一致。通过 EMA 更新这些属性值,可以保持保存的模型配置与当前模型一致。
+                # ======================================================================================================
                 self.ema.update_attr(self.model, include=['yaml', 'nc', 'args', 'names', 'stride', 'class_weights'])
+
+                # 计算是否是最后一个epoch
                 final_epoch = (epoch + 1 == self.epochs) or self.stopper.possible_stop
 
                 if self.args.val or final_epoch:
+                    # 进行模型验证，得到模型在验证集的指标和fitness，将训练过程的loss等信息保存到self.metrics中
                     self.metrics, self.fitness = self.validate()
+                # 保存训练指标到CSV文件里
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
+                # 使用early stopping判断是否需要停止训练：根据模型的fitness信息,early stopper会判断是否需要stop
                 self.stop = self.stopper(epoch + 1, self.fitness)
 
-                # Save model
+                # 保存模型
                 if self.args.save or (epoch + 1 == self.epochs):
                     self.save_model()
                     self.run_callbacks('on_model_save')
@@ -394,12 +489,12 @@ class BaseTrainer:
                 break  # must break all DDP ranks
 
         if RANK in (-1, 0):
-            # Do final val with best.pt
+            # 使用best.pt做最后一次验证
             LOGGER.info(f'\n{epoch - self.start_epoch + 1} epochs completed in '
                         f'{(time.time() - self.train_time_start) / 3600:.3f} hours.')
             self.final_eval()
             if self.args.plots:
-                self.plot_metrics()
+                self.plot_metrics()  # 绘制指标
             self.run_callbacks('on_train_end')
         torch.cuda.empty_cache()
         self.run_callbacks('teardown')
@@ -611,6 +706,7 @@ class BaseTrainer:
         """
         Constructs an optimizer for the given model, based on the specified optimizer name, learning rate,
         momentum, weight decay, and number of iterations.
+        根据配置选择优化器类型和参数
 
         Args:
             model (torch.nn.Module): The model for which to build an optimizer.
