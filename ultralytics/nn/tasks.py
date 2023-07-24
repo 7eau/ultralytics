@@ -26,11 +26,13 @@ except ImportError:
 
 class BaseModel(nn.Module):
     """
+    YOLO模型的基类,定义了模型的基本接口:前向传播forward,损失计算loss,预测predict等 \n
     The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family.
     """
 
     def forward(self, x, *args, **kwargs):
         """
+        模型前向传播的主入口,输入为图像或图像+标签,返回预测或损失 \n
         Forward pass of the model on a single scale.
         Wrapper for `_forward_once` method.
 
@@ -46,13 +48,14 @@ class BaseModel(nn.Module):
 
     def predict(self, x, profile=False, visualize=False, augment=False):
         """
+        仅进行前向推理预测,可选择是否profiling和可视化 \n
         Perform a forward pass through the network.
 
         Args:
-            x (torch.Tensor): The input tensor to the model.
-            profile (bool):  Print the computation time of each layer if True, defaults to False.
-            visualize (bool): Save the feature maps of the model if True, defaults to False.
-            augment (bool): Augment image during prediction, defaults to False.
+            x (torch.Tensor): 模型的输入tensor.
+            profile (bool):  如果为True打印每层的计算时间，默认为False.
+            visualize (bool): 如果为True,则保存模型的feature maps， 默认为False.
+            augment (bool): 如果为True,则预测期间保持图像增强，默认为False.
 
         Returns:
             (torch.Tensor): The last output of the model.
@@ -63,6 +66,7 @@ class BaseModel(nn.Module):
 
     def _predict_once(self, x, profile=False, visualize=False):
         """
+        单尺度图像的前向推理 \n
         Perform a forward pass through the network.
 
         Args:
@@ -86,7 +90,10 @@ class BaseModel(nn.Module):
         return x
 
     def _predict_augment(self, x):
-        """Perform augmentations on input image x and return augmented inference."""
+        """
+        多尺度图像的前向推理,默认不实现 \n
+        Perform augmentations on input image x and return augmented inference.
+        """
         LOGGER.warning(
             f'WARNING ⚠️ {self.__class__.__name__} has not supported augment inference yet! Now using single-scale inference instead.'
         )
@@ -94,6 +101,7 @@ class BaseModel(nn.Module):
 
     def _profile_one_layer(self, m, x, dt):
         """
+        测量并打印某一层的计算时间 \n
         Profile the computation time and FLOPs of a single layer of the model on a given input.
         Appends the results to the provided list.
 
@@ -119,6 +127,7 @@ class BaseModel(nn.Module):
 
     def fuse(self, verbose=True):
         """
+        将BN和卷积层融合可以加速推理 \n
         Fuse the `Conv2d()` and `BatchNorm2d()` layers of the model into a single layer, in order to improve the
         computation efficiency.
 
@@ -146,6 +155,7 @@ class BaseModel(nn.Module):
 
     def is_fused(self, thresh=10):
         """
+        判断模型是否已经融合。 \n
         Check if the model has less than a certain threshold of BatchNorm layers.
 
         Args:
@@ -159,6 +169,7 @@ class BaseModel(nn.Module):
 
     def info(self, detailed=False, verbose=True, imgsz=640):
         """
+        打印模型信息 \n
         Prints model information
 
         Args:
@@ -169,6 +180,7 @@ class BaseModel(nn.Module):
 
     def _apply(self, fn):
         """
+        在模型的所有参数和缓冲区上应用一个函数 \n
         `_apply()` is a function that applies a function to all the tensors in the model that are not
         parameters or registered buffers
 
@@ -187,7 +199,8 @@ class BaseModel(nn.Module):
         return self
 
     def load(self, weights, verbose=True):
-        """Load the weights into the model.
+        """从权重文件加载预训练模型 \n
+        Load the weights into the model.
 
         Args:
             weights (dict | torch.nn.Module): The pre-trained weights to be loaded.
@@ -201,7 +214,7 @@ class BaseModel(nn.Module):
             LOGGER.info(f'Transferred {len(csd)}/{len(self.model.state_dict())} items from pretrained weights')
 
     def loss(self, batch, preds=None):
-        """
+        """计算损失函数,需要在子类中实现criterion \n
         Compute loss
 
         Args:
@@ -223,37 +236,66 @@ class DetectionModel(BaseModel):
 
     def __init__(self, cfg='yolov8n.yaml', ch=3, nc=None, verbose=True):  # model, input channels, number of classes
         super().__init__()
-        self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
+        self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # 获取配置文件dict
 
-        # Define model
-        ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # input channels
+        # 定义和构建模型
+        ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # 获取输入通道数，如果配置文件中未配置，则默认是3
+        # 以数据集中定义的类别数为准，如果数据集中的类别数和配置文件中的类别数不一致，将重写配置文件中的类别数
         if nc and nc != self.yaml['nc']:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml['nc'] = nc  # override yaml value
+        # 构建模型，获取model及savelist
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
-        self.names = {i: f'{i}' for i in range(self.yaml['nc'])}  # default names dict
+        self.names = {i: f'{i}' for i in range(self.yaml['nc'])}  # 模型配置文件中默认的各类别名称列表
+        # inplace是PyTorch的一个参数,决定了某些操作(如激活函数)是否进行inplace操作
+        # ======================================================
+        # inplace=True意味着会对激活函数的输入进行覆盖从而节省内存。
+        # inplace=False意味着不覆盖输入张量而生成新的输出。
+        # inplace往往在考虑内存占用与速度之间的tradeoff
+        # ======================================================
         self.inplace = self.yaml.get('inplace', True)
 
-        # Build strides
+        # 计算网络的下采样比例stride,并设置到最后的预测层(如Detect)中
+        # 1. 取出网络的最后一层,假设是检测预测层Detect()
         m = self.model[-1]  # Detect()
         if isinstance(m, (Detect, Segment, Pose)):
+            # 2. 设置初始下采样步幅s = 256, 是anchor设计的常用基础尺寸
             s = 256  # 2x min stride
+            # 3. 将self.inplace赋值给预测层的inplace
             m.inplace = self.inplace
+            # 4. 定义前向函数forward,根据网络类型不同稍有变化
             forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, Pose)) else self.forward(x)
+            # 5. 传入全0输入,获取网络各层输出的shape, 计算各层shape比输入shape的下采样比例,即stride,并赋值给预测层模块m
             m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
+            # 6. 将算得的stride赋值给网络self
             self.stride = m.stride
+            # 7. 调用bias_init()初始化预测层偏置
             m.bias_init()  # only run once
-        else:
+        else:  # 如果最后一层不是预测层,则直接设置默认步幅为32
             self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
 
-        # Init weights, biases
+        # 初始化 weights, biases
         initialize_weights(self)
+
+        # 输出模型的结构和参数信息
         if verbose:
             self.info()
             LOGGER.info('')
 
     def _predict_augment(self, x):
-        """Perform augmentations on input image x and return augmented inference and train outputs."""
+        """
+        实现测试时增强推理(augmented inference)
+        Perform augmentations on input image x and return augmented inference and train outputs.
+        """
+        # ==========================================================
+        # 1. 对于输入图片,根据不同尺度s和翻转方向f,做多尺度和翻转增强。
+        # 2. 对每种增强后的图片,都进行预测,得到增强后预测框。
+        # 3. 通过_descale_pred()方法对预测框进行反尺度变换和反翻转。
+        # 4. 通过_clip_augmented()方法裁剪预测框,只保留有效区域。
+        # 5. 将所有增强结果预测框堆叠起来,最终实现测试时的多尺度和翻转推理。
+        #
+        # 增强推理可以提升小目标的检测效果,是YOLO框架的一大特点
+        # ==========================================================
         img_size = x.shape[-2:]  # height, width
         s = [1, 0.83, 0.67]  # scales
         f = [None, 3, None]  # flips (2-ud, 3-lr)
@@ -269,7 +311,10 @@ class DetectionModel(BaseModel):
 
     @staticmethod
     def _descale_pred(p, flips, scale, img_size, dim=1):
-        """De-scale predictions following augmented inference (inverse operation)."""
+        """
+        对预测框进行反尺度变换和反翻转
+        De-scale predictions following augmented inference (inverse operation).
+        """
         p[:, :4] /= scale  # de-scale
         x, y, wh, cls = p.split((1, 1, 2, p.shape[dim] - 4), dim)
         if flips == 2:
@@ -279,7 +324,10 @@ class DetectionModel(BaseModel):
         return torch.cat((x, y, wh, cls), dim)
 
     def _clip_augmented(self, y):
-        """Clip YOLOv5 augmented inference tails."""
+        """
+        裁剪预测框,只保留有效区域
+        Clip YOLOv5 augmented inference tails.
+        """
         nl = self.model[-1].nl  # number of detection layers (P3-P5)
         g = sum(4 ** x for x in range(nl))  # grid points
         e = 1  # exclude layer count
@@ -290,6 +338,11 @@ class DetectionModel(BaseModel):
         return y
 
     def init_criterion(self):
+        """
+        初始化用于计算损失的criterion
+        Returns: Criterion class for computing Detection training losses
+
+        """
         return v8DetectionLoss(self)
 
 
@@ -600,14 +653,26 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     return model, ckpt
 
 
-def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
-    # Parse a YOLO model.yaml dictionary into a PyTorch model
+def parse_model(d, ch, verbose=True):
+    """
+    将YOLO的模型配置字典解析成一个PyTorch模块网络
+    Args:
+        d: model_dict
+        ch: input_channels(3)
+        verbose: 控制是否打印详细的日志信息, 默认为True
+
+    Returns: a PyTorch model(parse from model.yaml),
+             a savelist, 可训练参数的索引表
+
+    """
     import ast
 
-    # Args
+    # 从模型中获取需要的参数
     max_channels = float('inf')
     nc, act, scales = (d.get(x) for x in ('nc', 'activation', 'scales'))
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ('depth_multiple', 'width_multiple', 'kpt_shape'))
+
+    # 从模型配置字典中解析出该模型的尺度(scale)信息,然后根据尺度设置模型的深度(depth)、宽度(width)和最大通道数(max_channels)
     if scales:
         scale = d.get('scale')
         if not scale:
@@ -615,23 +680,67 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             LOGGER.warning(f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}'.")
         depth, width, max_channels = scales[scale]
 
+    # 从模型配置字典中解析activation函数的类型, 并重新定义Conv模块的默认activation
     if act:
         Conv.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
         if verbose:
             LOGGER.info(f"{colorstr('activation:')} {act}")  # print
 
+    # 打印日志
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
+
+    # 这段代码的主要目的是基于配置字典,递归地构建每个模块及其参数,并连接到Sequential中
+    # ==================================================================================================================
+    # f: from索引, n: 重复数, m: 模型类型, args: 参数
+    # 具体来看:
+    # 1. 从backbone和head中遍历每个模块的配置信息,包括from索引f、重复数n、模块类型m和参数args。
+    # 2. 根据m创建实际的模块对象,如果m的类型在nn中就直接创建,否则从全局命名空间获取。
+    # 3. 解析args中的字符串为实际变量或表达式。
+    # 4. 计算重复数n_。
+    # 5. 根据模块类型调整输入输出通道:
+    #   - 对于大多数模块,设置输入输出通道为ch[f]、ch[f+1],还可能插入n_。
+    #   - 对BN、Concat特殊处理输入通道。
+    #   - 对Detect等设置f。
+    # ==================================================================================================================
     ch = [ch]
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
-        m = getattr(torch.nn, m[3:]) if 'nn.' in m else globals()[m]  # get module
+        # 1. 从配置字典中获取模块类名,并将字符串转换成实际的模块类
+        # ====================================================================
+        # 1.1. 从配置字典中取出字符串形式的模块类名m
+        # 1.2. 判断m是否以'nn.'开头,即是否是PyTorch内置的模块。
+        #   如果是,则用getattr()根据模块路径获取模块类,例如'nn.Conv2d'。如果不是,
+        #   则说明是自定义的模块类,位于全局命名空间globals()中。
+        # 1.3. 利用globals()可以根据字符串KEY取出实际的类,例如'Focus'。
+        # 1.4. m[3:]是为了去掉开头的'nn.'或其他标识。
+        # 1.5. 最后将字符串转换成了实际的类对象,保存在m中。
+        # ====================================================================
+        m = getattr(torch.nn, m[3:]) if 'nn.' in m else globals()[m]
+
+        # 2. 解析模块的参数字符串,将其转换为实际的变量或表达式
+        # =============================================================
+        # 2.1. 遍历模块参数args
+        # 2.2. 判断每个参数a是否为字符串类型
+        # 2.3. 如果是,try转换:
+        #   2.3.1 如果a在locals()中,表示它是参数名,直接取值
+        #   2.3.2 如果不在,使用ast.literal_eval执行字符串表达式,转换成变量
+        # 2.4. 将转换后的参数重新赋值给args。
+        # =============================================================
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
 
-        n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
+        # 3. 根据depth_multiple来计算每个模块的重复次数n_
+        n = n_ = max(round(n * depth), 1) if n > 1 else n
+
+        # 4. 根据模块类型调整输入输出通道:
+        # ============================================================
+        #   - 对于大多数模块,设置输入输出通道为ch[f]、ch[f+1],还可能插入n_
+        #   - 对BN、Concat特殊处理输入通道。
+        #   - 对Detect等设置f。
+        # ============================================================
         if m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, Focus,
                  BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3):
             c1, c2 = ch[f], args[0]
@@ -662,22 +771,35 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         else:
             c2 = ch[f]
 
-        m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
-        t = str(m)[8:-2].replace('__main__.', '')  # module type
-        m.np = sum(x.numel() for x in m_.parameters())  # number params
+        # 5. 根据重复次数n和参数args构建模块m的重复容器m_
+        m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)
+
+        # 6. 计算和保存模块m相关信息
+        t = str(m)[8:-2].replace('__main__.', '')  # 从模块m的字符串表示中提取出模块类型
+        m.np = sum(x.numel() for x in m_.parameters())  # 计算模块m中的可训练参数数量
         m_.i, m_.f, m_.type = i, f, t  # attach index, 'from' index, type
+
+        # 7. 打印日志
         if verbose:
             LOGGER.info(f'{i:>3}{str(f):>20}{n_:>3}{m.np:10.0f}  {t:<45}{str(args):<30}')  # print
-        save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
+
+        # 8. 保存模块
+        # 构建模型可训练参数的索引表savelist，为了可以方便地实现参数选择性冻结
+        save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)
+        # 追加模型到layers中
         layers.append(m_)
+        # 更新并保存网络每个模块的输出通道数
         if i == 0:
             ch = []
-        ch.append(c2)
-    return nn.Sequential(*layers), sorted(save)
+        ch.append(c2)  # 更新输出通道
+    return nn.Sequential(*layers), sorted(save)  # 返回Sequential模型和savelist
 
 
 def yaml_model_load(path):
-    """Load a YOLOv8 model from a YAML file."""
+    """
+    从 yaml 配置文件中加载一个YOLOv8模型
+    Load a YOLOv8 model from a YAML file.
+    """
     import re
 
     path = Path(path)
@@ -696,6 +818,7 @@ def yaml_model_load(path):
 
 def guess_model_scale(model_path):
     """
+    从YOLO模型的配置文件路径中猜测其模型尺度大小(scale)\n
     Takes a path to a YOLO model's YAML file as input and extracts the size character of the model's scale.
     The function uses regular expression matching to find the pattern of the model scale in the YAML file name,
     which is denoted by n, s, m, l, or x. The function returns the size character of the model scale as a string.
@@ -709,11 +832,12 @@ def guess_model_scale(model_path):
     with contextlib.suppress(AttributeError):
         import re
         return re.search(r'yolov\d+([nslmx])', Path(model_path).stem).group(1)  # n, s, m, l, or x
-    return ''
+    return ''  # 如果没有找到,返回空字符串
 
 
 def guess_model_task(model):
     """
+    猜测一个PyTorch模型或配置字典的任务类型(task),即检测、分割、分类等
     Guess the task of a PyTorch model from its architecture or configuration.
 
     Args:
@@ -739,12 +863,13 @@ def guess_model_task(model):
             return 'pose'
 
     # Guess from model cfg
-    if isinstance(model, dict):
+    if isinstance(model, dict):  # 如果输入是配置字典,根据'head'中的最后一层解析task
         with contextlib.suppress(Exception):
             return cfg2task(model)
 
     # Guess from PyTorch model
-    if isinstance(model, nn.Module):  # PyTorch model
+    if isinstance(model, nn.Module):  # 如果是PyTorch模型,遍历模块判断类型,如果有Detect/Segment等模块则解析任务类型
+        # 尝试解析模型的yaml文件或args参数来获取任务类型
         for x in 'model.args', 'model.model.args', 'model.model.model.args':
             with contextlib.suppress(Exception):
                 return eval(x)['task']
@@ -763,7 +888,7 @@ def guess_model_task(model):
                 return 'pose'
 
     # Guess from model filename
-    if isinstance(model, (str, Path)):
+    if isinstance(model, (str, Path)):  # 如果模型路径中包含关键字如'detect',也可判断任务类型
         model = Path(model)
         if '-seg' in model.stem or 'segment' in model.parts:
             return 'segment'
@@ -777,4 +902,4 @@ def guess_model_task(model):
     # Unable to determine task from model
     LOGGER.warning("WARNING ⚠️ Unable to automatically guess model task, assuming 'task=detect'. "
                    "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify', or 'pose'.")
-    return 'detect'  # assume detect
+    return 'detect'  # 如果无法判断，默认为 detect
