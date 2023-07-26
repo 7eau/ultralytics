@@ -20,53 +20,101 @@ __all__ = 'Detect', 'Segment', 'Pose', 'Classify', 'RTDETRDecoder'
 
 
 class Detect(nn.Module):
-    """YOLOv8 Detect head for detection models."""
-    dynamic = False  # force grid reconstruction
-    export = False  # export mode
-    shape = None
-    anchors = torch.empty(0)  # init
-    strides = torch.empty(0)  # init
+    """用于检测模型的YOLOv8检测头部."""
+    dynamic = False  # 一个布尔值，用于强制进行网格重构
+    export = False  # 一个布尔值，用于导出模式
+    shape = None  # 一个表示形状的变量，初始值为None
+    anchors = torch.empty(0)  # 一个空的torch张量，用于初始化锚点
+    strides = torch.empty(0)  # 一个空的torch张量，用于初始化步长
 
     def __init__(self, nc=80, ch=()):  # detection layer
+        """
+        初始化方法
+
+        Args:
+            nc: 表示类别的数量，默认为80
+            ch: 表示检测层的通道数，默认为空元组
+        """
         super().__init__()
-        self.nc = nc  # number of classes
-        self.nl = len(ch)  # number of detection layers
-        self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+        self.nc = nc  # 类别数 number of classes
+        self.nl = len(ch)  # 检测层数 number of detection layers
+        self.reg_max = 16  # DFL通道数 DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
+        # 计算cv2和cv3模块的中间层的通道数
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+        # 用以回归框预测
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
+        # 用以分类预测
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+        # 用于调整边界框坐标,还可以在训练和推理时进行网格尺寸的重构
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def forward(self, x):
-        """Concatenates and returns predicted bounding boxes and class probabilities."""
-        shape = x[0].shape  # BCHW
-        for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
-        if self.training:
+        """
+        前向传播方法, 接收一个输入张量x，并返回预测的边界框和类别概率的拼接结果
+        Concatenates and returns predicted bounding boxes and class probabilities.
+        """
+        shape = x[0].shape  # BCHW, [Batches, Channels, Height, Weight]
+        for i in range(self.nl):  # 遍历每个检测层，得到输出
+            #  cls和box任务解耦, 分别进入不同的分支运算，然后在通道维度上进行拼接
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)  # X.shape = [B, self.no, H, W]
+        if self.training:  # 训练模式, 直接返回处理后的结果x
             return x
         elif self.dynamic or self.shape != shape:
+            # 模型处于动态模式（self.dynamic=True）或者输入形状shape与之前保存的形状self.shape不一致, 进行网格重构和形状更新
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 
+        # 将不同尺度特征在空间维度上统一(得到多尺度特征图),然后后面可以在这个特征上同时进行框回归和分类,实现多尺度的预测
+        # x => [B, self.no, (H1 x W1 + H2 x W2 + ...)]
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+
+        # 将拼接后的张量切分为边界框部分和类别概率部分
+        # ==============================================================================================================
+        # 这样做的原因是:
+        #   PyTorch的split操作在TensorFlow导出时会被转换成FlexSplitV,但FlexSplitV在TFLite中不被支持
+        #   所以在导出模型时,需要用简单的切片替代,避免FlexSplitV操作
+        # shape变化:
+        # x_cat: [B, self.no, H*W] =>
+        #   => box: [B, self.reg_max * 4, H*W]
+        #   => cls: [B, self.nc, H*W]
+        # ==============================================================================================================
         if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
             box = x_cat[:, :self.reg_max * 4]
             cls = x_cat[:, self.reg_max * 4:]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+
+        # 将网络预测得到的边界框回归参数box,转化为相对于输入图像大小的真实边界框坐标dbox
+        # => dbox: [B, nA, 4, H*W], nA是先验框的数量: 表示每张图像的每个先验框在特征图上对应的坐标预测
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
+
+        # 将调整后的边界框和类别概率进行拼接
+        # => y: [B, nA + nc, 4 + 1, H*W], 即[Bathes, 先验框数+类别数, 坐标+概率, 特征图大小]
         y = torch.cat((dbox, cls.sigmoid()), 1)
+
+        # 如果处于导出模式，则返回拼接后的结果y；否则，返回一个元组，包含拼接后的结果y和输入张量x
         return y if self.export else (y, x)
 
     def bias_init(self):
-        """Initialize Detect() biases, WARNING: requires stride availability."""
+        """
+        初始化偏置方法，初始化检测头部最后一层的偏置项
+        Initialize Detect() biases, WARNING: requires stride availability.
+        """
         m = self  # self.model[-1]  # Detect() module
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
+            # ==========================================================================================================
+            # 初始化回归头cv2中最后一层的偏置项a[-1].bias.data:
+            #   - 将偏置初始化为1,作为框的先验偏置，默认认为每个anchor区域内存在一个物体
+            # 初始化分类头cv3中最后一层的偏置项b[-1].bias.data:
+            #   - 根据每个类别的先验概率分布初始化偏置,默认为均匀分布
+            #   - 这将估计每个类别出现的概率,作为softmax的偏置使用
+            #   - 根据strides计算先验框的尺度范围,初始化偏置以平衡不同尺度下的框密度
+            # ==========================================================================================================
             a[-1].bias.data[:] = 1.0  # box
             b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
 
