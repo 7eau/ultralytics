@@ -60,7 +60,7 @@ from pathlib import Path
 import torch
 
 from ultralytics.nn.autobackend import check_class_names
-from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder
+from ultralytics.nn.modules import C2f, Detect, DetectH, RTDETRDecoder
 from ultralytics.nn.tasks import DetectionModel, SegmentationModel
 from ultralytics.yolo.cfg import get_cfg
 from ultralytics.yolo.utils import (ARM64, DEFAULT_CFG, LINUX, LOGGER, MACOS, ROOT, __version__, callbacks, colorstr,
@@ -187,7 +187,7 @@ class Exporter:
         model.float()
         model = model.fuse()
         for k, m in model.named_modules():
-            if isinstance(m, (Detect, RTDETRDecoder)):  # Segment and Pose use Detect base class
+            if isinstance(m, (Detect, DetectH, RTDETRDecoder)):  # Segment and Pose use Detect base class
                 m.dynamic = self.args.dynamic
                 m.export = True
                 m.format = self.args.format

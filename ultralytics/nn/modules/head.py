@@ -11,12 +11,13 @@ from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.yolo.utils.tal import dist2bbox, make_anchors
 
-from .block import DFL, Proto
+from .block import DFL, Proto, Bottleneck
+from .coordatt import CoordAtt
 from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init_
 
-__all__ = 'Detect', 'Segment', 'Pose', 'Classify', 'RTDETRDecoder'
+__all__ = 'Detect', 'DetectH', 'Segment', 'Pose', 'Classify', 'RTDETRDecoder'
 
 
 class Detect(nn.Module):
@@ -117,6 +118,25 @@ class Detect(nn.Module):
             # ==========================================================================================================
             a[-1].bias.data[:] = 1.0  # box
             b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
+
+class DetectH(Detect):
+    def __init__(self, nc=80, ch=()):  # detection layer
+        """
+        初始化方法
+
+        Args:
+            nc: 表示类别的数量，默认为6
+            ch: 表示检测层的通道数，默认为空元组
+        """
+        super().__init__(nc, ch)
+        # 计算cv2和cv3模块的中间层的通道数
+        c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+        # 用以回归框预测
+        self.cv2 = nn.ModuleList(
+            nn.Sequential(CoordAtt(x, x), Bottleneck(x, c2, k=(3, 3)), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
+        # 用以分类预测
+        self.cv3 = nn.ModuleList(nn.Sequential(CoordAtt(x, x), Bottleneck(x, c3, k=(3, 3)), nn.Conv2d(c3, self.nc, 1)) for x in ch)
 
 
 class Segment(Detect):

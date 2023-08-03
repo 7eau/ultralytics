@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x,
-                                    Classify, Concat, Conv, Conv2, ConvTranspose, Detect, DWConv, DWConvTranspose2d,
+                                    Classify, Concat, Conv, Conv2, ConvTranspose, Detect, DetectH, DWConv, DWConvTranspose2d,
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment, CoordAtt, StemBlock)
 from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
@@ -192,7 +192,7 @@ class BaseModel(nn.Module):
         """
         self = super()._apply(fn)
         m = self.model[-1]  # Detect()
-        if isinstance(m, (Detect, Segment)):
+        if isinstance(m, (Detect, DetectH, Segment)):
             m.stride = fn(m.stride)
             m.anchors = fn(m.anchors)
             m.strides = fn(m.strides)
@@ -258,7 +258,7 @@ class DetectionModel(BaseModel):
         # 计算网络的下采样比例stride,并设置到最后的预测层(如Detect)中
         # 1. 取出网络的最后一层,假设是检测预测层Detect()
         m = self.model[-1]  # Detect()
-        if isinstance(m, (Detect, Segment, Pose)):
+        if isinstance(m, (Detect, DetectH, Segment, Pose)):
             # 2. 设置初始下采样步幅s = 256, 是anchor设计的常用基础尺寸
             s = 256  # 2x min stride
             # 3. 将self.inplace赋值给预测层的inplace
@@ -608,7 +608,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     # Module compatibility updates
     for m in ensemble.modules():
         t = type(m)
-        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Segment):
+        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, DetectH, Segment):
             m.inplace = inplace  # torch 1.7.0 compatibility
         elif t is nn.Upsample and not hasattr(m, 'recompute_scale_factor'):
             m.recompute_scale_factor = None  # torch 1.11.0 compatibility
@@ -644,7 +644,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     # Module compatibility updates
     for m in model.modules():
         t = type(m)
-        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Segment):
+        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, DetectH, Segment):
             m.inplace = inplace  # torch 1.7.0 compatibility
         elif t is nn.Upsample and not hasattr(m, 'recompute_scale_factor'):
             m.recompute_scale_factor = None  # torch 1.11.0 compatibility
@@ -765,7 +765,7 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in (Detect, Segment, Pose, RTDETRDecoder):
+        elif m in (Detect, DetectH, Segment, Pose, RTDETRDecoder):
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
@@ -879,7 +879,7 @@ def guess_model_task(model):
                 return cfg2task(eval(x))
 
         for m in model.modules():
-            if isinstance(m, Detect):
+            if isinstance(m, (Detect, DetectH)):
                 return 'detect'
             elif isinstance(m, Segment):
                 return 'segment'
