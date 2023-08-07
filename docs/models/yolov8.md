@@ -1,7 +1,7 @@
 ---
 comments: true
-description: Learn about YOLOv8's pre-trained weights supporting detection, instance segmentation, pose, and classification tasks. Get performance details.
-keywords: YOLOv8, real-time object detection, object detection, deep learning, machine learning
+description: Explore the thrilling features of YOLOv8, the latest version of our real-time object detector! Learn how advanced architectures, pre-trained models and optimal balance between accuracy & speed make YOLOv8 the perfect choice for your object detection tasks.
+keywords: YOLOv8, Ultralytics, real-time object detector, pre-trained models, documentation, object detection, YOLO series, advanced architectures, accuracy, speed
 ---
 
 # YOLOv8
@@ -21,12 +21,12 @@ YOLOv8 is the latest iteration in the YOLO series of real-time object detectors,
 
 ## Supported Tasks
 
-| Model Type  | Pre-trained Weights                                                                                              | Task                  |
-|-------------|------------------------------------------------------------------------------------------------------------------|-----------------------|
-| YOLOv8      | `yolov8n.pt`, `yolov8s.pt`, `yolov8m.pt`, `yolov8l.pt`, `yolov8x.pt`                                             | Detection             |
-| YOLOv8-seg  | `yolov8n-seg.pt`, `yolov8s-seg.pt`, `yolov8m-seg.pt`, `yolov8l-seg.pt`, `yolov8x-seg.pt`                         | Instance Segmentation |
-| YOLOv8-pose | `yolov8n-pose.pt`, `yolov8s-pose.pt`, `yolov8m-pose.pt`, `yolov8l-pose.pt`, `yolov8x-pose.pt` ,`yolov8x-pose-p6` | Pose/Keypoints        |
-| YOLOv8-cls  | `yolov8n-cls.pt`, `yolov8s-cls.pt`, `yolov8m-cls.pt`, `yolov8l-cls.pt`, `yolov8x-cls.pt`                         | Classification        |
+| Model Type  | Pre-trained Weights                                                                                                 | Task                  |
+|-------------|---------------------------------------------------------------------------------------------------------------------|-----------------------|
+| YOLOv8      | `yolov8n.pt`, `yolov8s.pt`, `yolov8m.pt`, `yolov8l.pt`, `yolov8x.pt`                                                | Detection             |
+| YOLOv8-seg  | `yolov8n-seg.pt`, `yolov8s-seg.pt`, `yolov8m-seg.pt`, `yolov8l-seg.pt`, `yolov8x-seg.pt`                            | Instance Segmentation |
+| YOLOv8-pose | `yolov8n-pose.pt`, `yolov8s-pose.pt`, `yolov8m-pose.pt`, `yolov8l-pose.pt`, `yolov8x-pose.pt`, `yolov8x-pose-p6.pt` | Pose/Keypoints        |
+| YOLOv8-cls  | `yolov8n-cls.pt`, `yolov8s-cls.pt`, `yolov8m-cls.pt`, `yolov8l-cls.pt`, `yolov8x-cls.pt`                            | Classification        |
 
 ## Supported Modes
 

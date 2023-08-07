@@ -1,0 +1,14 @@
+path: ../datasets/shel5kv4
+train: train/images
+val: valid/images
+test: valid/images
+
+nc: 6
+names: ['face', 'head', 'head_with_helmet', 'helmet', 'person_no_helmet', 'person_with_helmet']
+
+roboflow:
+  workspace: lyh
+  project: shel5kv4
+  version: 2
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/lyh/shel5kv4/dataset/2
