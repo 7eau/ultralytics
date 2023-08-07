@@ -11,12 +11,12 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     Classify, Concat, Conv, Conv2, ConvTranspose, Detect, DWConv, DWConvTranspose2d,
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment)
-from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
-from ultralytics.yolo.utils.checks import check_requirements, check_suffix, check_yaml
-from ultralytics.yolo.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
-from ultralytics.yolo.utils.plotting import feature_visualization
-from ultralytics.yolo.utils.torch_utils import (fuse_conv_and_bn, fuse_deconv_and_bn, initialize_weights,
-                                                intersect_dicts, make_divisible, model_info, scale_img, time_sync)
+from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
+from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
+from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
+from ultralytics.utils.plotting import feature_visualization
+from ultralytics.utils.torch_utils import (fuse_conv_and_bn, fuse_deconv_and_bn, initialize_weights, intersect_dicts,
+                                           make_divisible, model_info, scale_img, time_sync)
 
 try:
     import thop
@@ -90,6 +90,9 @@ class BaseModel(nn.Module):
         return x
 
     def _predict_augment(self, x):
+        """Perform augmentations on input image x and return augmented inference."""
+        LOGGER.warning(f'WARNING ⚠️ {self.__class__.__name__} does not support augmented inference yet. '
+                       f'Reverting to single-scale inference instead.')
         """
         多尺度图像的前向推理,默认不实现 \n
         Perform augmentations on input image x and return augmented inference.
@@ -113,15 +116,15 @@ class BaseModel(nn.Module):
         Returns:
             None
         """
-        c = m == self.model[-1]  # is final layer, copy input as inplace fix
-        o = thop.profile(m, inputs=[x.clone() if c else x], verbose=False)[0] / 1E9 * 2 if thop else 0  # FLOPs
+        c = m == self.model[-1] and isinstance(x, list)  # is final layer list, copy input as inplace fix
+        flops = thop.profile(m, inputs=[x.copy() if c else x], verbose=False)[0] / 1E9 * 2 if thop else 0  # FLOPs
         t = time_sync()
         for _ in range(10):
-            m(x.clone() if c else x)
+            m(x.copy() if c else x)
         dt.append((time_sync() - t) * 100)
         if m == self.model[0]:
             LOGGER.info(f"{'time (ms)':>10s} {'GFLOPs':>10s} {'params':>10s}  module")
-        LOGGER.info(f'{dt[-1]:10.2f} {o:10.2f} {m.np:10.0f}  {m.type}')
+        LOGGER.info(f'{dt[-1]:10.2f} {flops:10.2f} {m.np:10.0f}  {m.type}')
         if c:
             LOGGER.info(f"{sum(dt):10.2f} {'-':>10s} {'-':>10s}  Total")
 
@@ -173,6 +176,7 @@ class BaseModel(nn.Module):
         Prints model information
 
         Args:
+            detailed (bool): if True, prints out detailed information about the model. Defaults to False
             verbose (bool): if True, prints out the model information. Defaults to False
             imgsz (int): the size of the image that the model will be trained on. Defaults to 640
         """
@@ -180,12 +184,13 @@ class BaseModel(nn.Module):
 
     def _apply(self, fn):
         """
+        Applies a function to all the tensors in the model that are not parameters or registered buffers.
         在模型的所有参数和缓冲区上应用一个函数 \n
         `_apply()` is a function that applies a function to all the tensors in the model that are not
         parameters or registered buffers
 
         Args:
-            fn: the function to apply to the model
+            fn (function): the function to apply to the model
 
         Returns:
             A model that is a Detect() object.
@@ -199,7 +204,8 @@ class BaseModel(nn.Module):
         return self
 
     def load(self, weights, verbose=True):
-        """从权重文件加载预训练模型 \n
+        """
+        从权重文件加载预训练模型 \n
         Load the weights into the model.
 
         Args:
@@ -465,7 +471,7 @@ class RTDETRDetectionModel(DetectionModel):
 
     def init_criterion(self):
         """Compute the classification loss between predictions and true labels."""
-        from ultralytics.vit.utils.loss import RTDETRDetectionLoss
+        from ultralytics.models.utils.loss import RTDETRDetectionLoss
 
         return RTDETRDetectionLoss(nc=self.nc, use_vfl=True)
 
@@ -551,6 +557,47 @@ class Ensemble(nn.ModuleList):
 # Functions ------------------------------------------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def temporary_modules(modules=None):
+    """
+    Context manager for temporarily adding or modifying modules in Python's module cache (`sys.modules`).
+
+    This function can be used to change the module paths during runtime. It's useful when refactoring code,
+    where you've moved a module from one location to another, but you still want to support the old import
+    paths for backwards compatibility.
+
+    Args:
+        modules (dict, optional): A dictionary mapping old module paths to new module paths.
+
+    Example:
+        ```python
+        with temporary_modules({'old.module.path': 'new.module.path'}):
+            import old.module.path  # this will now import new.module.path
+        ```
+
+    Note:
+        The changes are only in effect inside the context manager and are undone once the context manager exits.
+        Be aware that directly manipulating `sys.modules` can lead to unpredictable results, especially in larger
+        applications or libraries. Use this function with caution.
+    """
+    if not modules:
+        modules = {}
+
+    import importlib
+    import sys
+    try:
+        # Set modules in sys.modules under their old name
+        for old, new in modules.items():
+            sys.modules[old] = importlib.import_module(new)
+
+        yield
+    finally:
+        # Remove the temporary module paths
+        for old in modules:
+            if old in sys.modules:
+                del sys.modules[old]
+
+
 def torch_safe_load(weight):
     """
     This function attempts to load a PyTorch model with the torch.load() function. If a ModuleNotFoundError is raised,
@@ -563,12 +610,17 @@ def torch_safe_load(weight):
     Returns:
         (dict): The loaded PyTorch model.
     """
-    from ultralytics.yolo.utils.downloads import attempt_download_asset
+    from ultralytics.utils.downloads import attempt_download_asset
 
     check_suffix(file=weight, suffix='.pt')
     file = attempt_download_asset(weight)  # search online if missing locally
     try:
-        return torch.load(file, map_location='cpu'), file  # load
+        with temporary_modules({
+                'ultralytics.yolo.utils': 'ultralytics.utils',
+                'ultralytics.yolo.v8': 'ultralytics.models.yolo',
+                'ultralytics.yolo.data': 'ultralytics.data'}):  # for legacy 8.0 Classify and Pose models
+            return torch.load(file, map_location='cpu'), file  # load
+
     except ModuleNotFoundError as e:  # e.name is missing module name
         if e.name == 'models':
             raise TypeError(
@@ -653,17 +705,10 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     return model, ckpt
 
 
-def parse_model(d, ch, verbose=True):
+def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     """
     将YOLO的模型配置字典解析成一个PyTorch模块网络
-    Args:
-        d: model_dict
-        ch: input_channels(3)
-        verbose: 控制是否打印详细的日志信息, 默认为True
-
-    Returns: a PyTorch model(parse from model.yaml),
-             a savelist, 可训练参数的索引表
-
+    Parse a YOLO model.yaml dictionary into a PyTorch model.
     """
     import ast
 
@@ -764,10 +809,12 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in (Detect, Segment, Pose, RTDETRDecoder):
+        elif m in (Detect, Segment, Pose):
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
+        elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+            args.insert(1, [ch[x] for x in f])
         else:
             c2 = ch[f]
 
@@ -818,7 +865,6 @@ def yaml_model_load(path):
 
 def guess_model_scale(model_path):
     """
-    从YOLO模型的配置文件路径中猜测其模型尺度大小(scale)\n
     Takes a path to a YOLO model's YAML file as input and extracts the size character of the model's scale.
     The function uses regular expression matching to find the pattern of the model scale in the YAML file name,
     which is denoted by n, s, m, l, or x. The function returns the size character of the model scale as a string.

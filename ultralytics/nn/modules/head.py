@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn.init import constant_, xavier_uniform_
 
-from ultralytics.yolo.utils.tal import dist2bbox, make_anchors
+from ultralytics.utils.tal import dist2bbox, make_anchors
 
 from .block import DFL, Proto
 from .conv import Conv
@@ -90,6 +90,16 @@ class Detect(nn.Module):
         # 将网络预测得到的边界框回归参数box,转化为相对于输入图像大小的真实边界框坐标dbox
         # => dbox: [B, nA, 4, H*W], nA是先验框的数量: 表示每张图像的每个先验框在特征图上对应的坐标预测
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
+
+        if self.export and self.format in ('tflite', 'edgetpu'):
+            # Normalize xywh with image size to mitigate quantization error of TFLite integer models as done in YOLOv5:
+            # https://github.com/ultralytics/yolov5/blob/0c8de3fca4a702f8ff5c435e67f378d1fce70243/models/tf.py#L307-L309
+            # See this PR for details: https://github.com/ultralytics/ultralytics/pull/1695
+            img_h = shape[2] * self.stride[0]
+            img_w = shape[3] * self.stride[0]
+            img_size = torch.tensor([img_w, img_h, img_w, img_h], device=dbox.device).reshape(1, 4, 1)
+            dbox /= img_size
+
 
         # 将调整后的边界框和类别概率进行拼接
         # => y: [B, nA + nc, 4 + 1, H*W], 即[Bathes, 先验框数+类别数, 坐标+概率, 特征图大小]
@@ -267,7 +277,7 @@ class RTDETRDecoder(nn.Module):
         self._reset_parameters()
 
     def forward(self, x, batch=None):
-        from ultralytics.vit.utils.ops import get_cdn_group
+        from ultralytics.models.utils.ops import get_cdn_group
 
         # input projection and embedding
         feats, shapes = self._get_encoder_input(x)
@@ -345,8 +355,6 @@ class RTDETRDecoder(nn.Module):
         features = self.enc_output(valid_mask * feats)  # bs, h*w, 256
 
         enc_outputs_scores = self.enc_score_head(features)  # (bs, h*w, nc)
-        # dynamic anchors + static content
-        enc_outputs_bboxes = self.enc_bbox_head(features) + anchors  # (bs, h*w, 4)
 
         # query selection
         # (bs, num_queries)
@@ -354,22 +362,23 @@ class RTDETRDecoder(nn.Module):
         # (bs, num_queries)
         batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype).unsqueeze(-1).repeat(1, self.num_queries).view(-1)
 
-        # Unsigmoided
-        refer_bbox = enc_outputs_bboxes[batch_ind, topk_ind].view(bs, self.num_queries, -1)
-        # refer_bbox = torch.gather(enc_outputs_bboxes, 1, topk_ind.reshape(bs, self.num_queries).unsqueeze(-1).repeat(1, 1, 4))
+        # (bs, num_queries, 256)
+        top_k_features = features[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+        # (bs, num_queries, 4)
+        top_k_anchors = anchors[:, topk_ind].view(bs, self.num_queries, -1)
+
+        # dynamic anchors + static content
+        refer_bbox = self.enc_bbox_head(top_k_features) + top_k_anchors
 
         enc_bboxes = refer_bbox.sigmoid()
         if dn_bbox is not None:
             refer_bbox = torch.cat([dn_bbox, refer_bbox], 1)
-        if self.training:
-            refer_bbox = refer_bbox.detach()
         enc_scores = enc_outputs_scores[batch_ind, topk_ind].view(bs, self.num_queries, -1)
 
-        if self.learnt_init_query:
-            embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1)
-        else:
-            embeddings = features[batch_ind, topk_ind].view(bs, self.num_queries, -1)
-            if self.training:
+        embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
+        if self.training:
+            refer_bbox = refer_bbox.detach()
+            if not self.learnt_init_query:
                 embeddings = embeddings.detach()
         if dn_embed is not None:
             embeddings = torch.cat([dn_embed, embeddings], 1)
