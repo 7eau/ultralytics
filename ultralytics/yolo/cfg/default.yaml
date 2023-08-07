@@ -7,9 +7,9 @@ mode: train  # (str) YOLO模式, i.e. train, val, predict, export, track, benchm
 # Train settings -------------------------------------------------------------------------------------------------------
 model: yolov8s-helmet.yaml # (str, optional) 模型文件的路径, i.e. yolov8n.pt, yolov8n.yaml
 data: shel5kv4.yaml # (str, optional) 数据文件的路径, i.e. coco128.yaml
-epochs: 20  # (int) 训练迭代次数
+epochs: 300  # (int) 训练迭代次数
 patience: 50  # (int) early stopping, 多少个epoch内模型性能不提升则停止训练
-batch: 16  # (int) 每批图片数量 (-1 为自动确定)
+batch: -1  # (int) 每批图片数量 (-1 为自动确定)
 imgsz: 640  # (int | list) 输入图片大小,训练和验证为int,预测和导出为list[w,h]
 save: True  # (bool) 是否保存检查点和预测结果
 save_period: -1 # (int) 保存检查点的周期,小于1则关闭
