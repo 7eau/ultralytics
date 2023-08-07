@@ -144,9 +144,9 @@ class DetectH(Detect):
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         # 用以回归框预测
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), CoordAtt(c2, c2), Bottleneck(c2, c2, k=(3, 3)), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
+            nn.Sequential(Conv(x, c2, 3), CoordAtt(c2, c2), CoordAtt(c2, c2), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
         # 用以分类预测
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), CoordAtt(c3, c3), Bottleneck(c3, c3, k=(3, 3)), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Bottleneck(c3, c3, k=(3, 3)), Bottleneck(c3, c3, k=(3, 3)), nn.Conv2d(c3, self.nc, 1)) for x in ch)
 
 
 class Segment(Detect):
