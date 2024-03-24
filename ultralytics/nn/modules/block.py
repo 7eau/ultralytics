@@ -1,5 +1,6 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
+import math
 
 import torch
 import torch.nn as nn
@@ -695,4 +696,233 @@ class CBFuse(nn.Module):
         target_size = xs[-1].shape[2:]
         res = [F.interpolate(x[self.idx[i]], size=target_size, mode="nearest") for i, x in enumerate(xs[:-1])]
         out = torch.sum(torch.stack(res + xs[-1:]), dim=0)
+        return out
+
+
+class ChannelAttention(nn.Module):
+    def __init__(self, in_planes, ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool= nn.AdaptiveAvgPool2d(1)
+        self.max_pool= nn.AdaptiveMaxPool2d(1)
+
+        self.fc1= nn.Conv2d(in_planes, in_planes//ratio, 1, bias=False)
+        self.relu1= nn.ReLU()
+        self.fc2= nn.Conv2d(in_planes//ratio, in_planes, 1, bias=False)
+        self.sigmoid= nn.Sigmoid()
+
+    def forward(self,x):
+        avg_out= self.fc2(self.relu1(self.fc1(self.avg_pool(x))))
+        max_out= self.fc2(self.relu1(self.fc1(self.max_pool(x))))
+        out= avg_out + max_out
+        return self.sigmoid(out)
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention,self).__init__()
+        self.conv1= nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)  # kernel size = 7 Padding is 3: (n - 7 + 1) + 2P = n
+        self.sigmoid= nn.Sigmoid()
+
+    def forward(self,x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv1(x)
+        return self.sigmoid(x)
+
+
+class CBAM(nn.Module):
+    def __init__(self, channelIn, channelOut):
+        super(CBAM, self).__init__()
+        self.channel_attention = ChannelAttention(channelIn)
+        self.spatial_attention = SpatialAttention()
+
+    def forward(self, x):
+        out = self.channel_attention(x) * x
+        out = self.spatial_attention(out) * out
+        return out
+
+
+def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1):
+    result = nn.Sequential()
+    result.add_module('conv', nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
+                                        kernel_size=kernel_size, stride=stride, padding=padding, groups=groups,
+                                        bias=False))
+    result.add_module('bn', nn.BatchNorm2d(num_features=out_channels))
+
+    return result
+
+
+
+class RepVGGBlock(nn.Module):
+
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, use_se=False, use_cbam=False,
+                 padding=1, dilation=1, groups=1, padding_mode='zeros', deploy=False):
+        super(RepVGGBlock, self).__init__()
+        self.deploy = deploy
+        self.groups = groups
+        self.in_channels = in_channels
+
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.groups = groups
+        self.padding_mode = padding_mode
+
+        padding_11 = padding - kernel_size // 2
+
+        # self.nonlinearity = nn.SiLU()
+        self.nonlinearity = nn.ReLU()
+
+        if use_se or use_cbam:
+            if use_se:
+                self.se = SEBlock(out_channels, internal_neurons=out_channels // 16)
+            if use_cbam:
+                self.se = CBAM(out_channels, internal_neurons=out_channels // 16)
+        else:
+            self.se = nn.Identity()
+
+        if deploy:
+            self.rbr_reparam = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
+                                         stride=stride,
+                                         padding=padding, dilation=dilation, groups=groups, bias=True,
+                                         padding_mode=padding_mode)
+
+        else:
+            self.rbr_identity = nn.BatchNorm2d(
+                num_features=in_channels) if out_channels == in_channels and stride == 1 else None
+            self.rbr_dense = conv_bn(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
+                                     stride=stride, padding=padding, groups=groups)
+            self.rbr_1x1 = conv_bn(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=stride,
+                                   padding=padding_11, groups=groups)
+            # print('RepVGG Block, identity = ', self.rbr_identity)
+
+
+class DWConv(Conv):
+    # Depth-wise convolution class
+    def __init__(self, c1, c2, k=1, s=1, act=True):  # ch_in, ch_out, kernel, stride, padding, groups
+        super().__init__(c1, c2, k, s, g=math.gcd(c1, c2), act=act)
+
+
+class SEBlock(nn.Module):
+
+    def __init__(self, input_channels, internal_neurons):
+        super(SEBlock, self).__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.down = nn.Conv2d(in_channels=input_channels, out_channels=internal_neurons, kernel_size=1, stride=1,
+                              bias=True)
+        self.up = nn.Conv2d(in_channels=internal_neurons, out_channels=input_channels, kernel_size=1, stride=1,
+                            bias=True)
+        self.input_channels = input_channels
+
+    def forward(self, inputs):
+        x = self.pool(inputs)
+        x = self.down(x)
+        x = F.relu(x)
+        x = self.up(x)
+        x = torch.sigmoid(x)
+        x = x.view(-1, self.input_channels, 1, 1)
+        return inputs * x
+
+
+class MobileNetV3_Block(nn.Module):
+    def __init__(self, inp, oup, hidden_dim, kernel_size, stride, use_se=False, use_hs=False):
+        super(MobileNetV3_Block, self).__init__()
+        assert stride in [1, 2]
+
+        self.identity = stride == 1 and inp == oup
+        if use_hs:
+            act = 'Hardswish'
+        else:
+            act = 'ReLU'
+
+        if inp == hidden_dim:
+            self.conv = nn.Sequential(
+                # dw
+                DWConv(hidden_dim, hidden_dim, k=kernel_size, s=stride, act=act),
+                # Squeeze-and-Excite
+                SEBlock(hidden_dim, internal_neurons=hidden_dim // 16) if use_se else nn.Sequential(),
+                # pw-linear
+                Conv(hidden_dim, oup, k=1, s=1, p=0, act=False),
+            )
+        else:
+            self.conv = nn.Sequential(
+                # pw
+                Conv(inp, hidden_dim, k=1, s=1, p=0, act=act),
+                # dw
+                DWConv(hidden_dim, hidden_dim, k=kernel_size, s=stride, act=False),
+                # Squeeze-and-Excite
+                SEBlock(hidden_dim, internal_neurons=hidden_dim // 16) if use_se else nn.Sequential(),
+                nn.Hardswish() if use_hs else nn.ReLU(),
+                # pw-linear
+                Conv(hidden_dim, oup, k=1, s=1, p=0, act=False),
+            )
+
+    def forward(self, x):
+        y = self.conv(x)
+        if self.identity:
+            return x + y
+        else:
+            return y
+
+    def fuse(self):
+        for m in self.conv:
+            if isinstance(m, (Conv, DWConv, RepVGGBlock)):
+                m.fuse()
+
+
+class h_sigmoid(nn.Module):
+    def __init__(self, inplace=True):
+        super(h_sigmoid, self).__init__()
+        self.relu = nn.ReLU6(inplace=inplace)
+
+    def forward(self, x):
+        return self.relu(x + 3) / 6
+
+
+class h_swish(nn.Module):
+    def __init__(self, inplace=True):
+        super(h_swish, self).__init__()
+        self.sigmoid = h_sigmoid(inplace=inplace)
+
+    def forward(self, x):
+        return x * self.sigmoid(x)
+
+
+class CoordAtt(nn.Module):
+    def __init__(self, inp, oup, reduction=32):
+        super(CoordAtt, self).__init__()
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+
+        mip = max(8, inp // reduction)
+
+        self.conv1 = nn.Conv2d(inp, mip, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mip)
+        self.act = h_swish()
+
+        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        identity = x
+
+        n, c, h, w = x.size()
+        x_h = self.pool_h(x)
+        x_w = self.pool_w(x).permute(0, 1, 3, 2)
+
+        y = torch.cat([x_h, x_w], dim=2)
+        y = self.conv1(y)
+        y = self.bn1(y)
+        y = self.act(y)
+
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+
+        a_h = self.conv_h(x_h).sigmoid()
+        a_w = self.conv_w(x_w).sigmoid()
+
+        out = identity * a_w * a_h
+
         return out
