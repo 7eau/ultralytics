@@ -38,6 +38,9 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "Silence",
+    "CBAM",
+    "MobileNetV3_Block",
+    "CoordAtt",
 )
 
 

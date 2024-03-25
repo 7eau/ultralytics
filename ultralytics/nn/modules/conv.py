@@ -52,6 +52,30 @@ class Conv(nn.Module):
     def forward_fuse(self, x):
         """Perform transposed convolution of 2D data."""
         return self.act(self.conv(x))
+    def fuse(self):
+        self.fusedconv = nn.Conv2d(self.conv.in_channels,
+                                   self.conv.out_channels,
+                                   kernel_size=self.conv.kernel_size,
+                                   stride=self.conv.stride,
+                                   padding=self.conv.padding,
+                                   groups=self.conv.groups,
+                                   bias=True).requires_grad_(False).to(self.conv.weight.device)
+        # prepare filters
+        w_conv = self.conv.weight.clone().view(self.conv.out_channels, -1)
+        w_bn = torch.diag(self.bn.weight.div(torch.sqrt(self.bn.eps + self.bn.running_var)))
+        self.fusedconv.weight.copy_(torch.mm(w_bn, w_conv).view(self.fusedconv.weight.shape))
+
+        # prepare spatial bias
+        b_conv = torch.zeros(self.conv.weight.size(0), device=self.conv.weight.device) if self.conv.bias is None else self.conv.bias
+        b_bn = self.bn.bias - self.bn.weight.mul(self.bn.running_mean).div(torch.sqrt(self.bn.running_var + self.bn.eps))
+        self.fusedconv.bias.copy_(torch.mm(w_bn, b_conv.reshape(-1, 1)).reshape(-1) + b_bn)
+
+        self.forward = self.fuseforward
+        self.__delattr__('conv')
+        self.__delattr__('bn')
+
+    def fuseforward(self, x):
+        return self.act(self.fusedconv(x))
 
 
 class Conv2(Conv):
