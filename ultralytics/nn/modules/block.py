@@ -41,6 +41,7 @@ __all__ = (
     "CBAM",
     "MobileNetV3_Block",
     "CoordAtt",
+    "StemBlock",
 )
 
 
@@ -431,7 +432,7 @@ class MaxSigmoidAttnBlock(nn.Module):
 
         aw = torch.einsum("bmchw,bnmc->bmhwn", embed, guide)
         aw = aw.max(dim=-1)[0]
-        aw = aw / (self.hc**0.5)
+        aw = aw / (self.hc ** 0.5)
         aw = aw + self.bias[None, :, None, None]
         aw = aw.sigmoid() * self.scale
 
@@ -495,7 +496,7 @@ class ImagePoolingAttn(nn.Module):
         """Executes attention mechanism on input tensor x and guide tensor."""
         bs = x[0].shape[0]
         assert len(x) == self.nf
-        num_patches = self.k**2
+        num_patches = self.k ** 2
         x = [pool(proj(x)).view(bs, -1, num_patches) for (x, proj, pool) in zip(x, self.projections, self.im_pools)]
         x = torch.cat(x, dim=-1).transpose(1, 2)
         q = self.query(text)
@@ -508,7 +509,7 @@ class ImagePoolingAttn(nn.Module):
         v = v.reshape(bs, -1, self.nh, self.hc)
 
         aw = torch.einsum("bnmc,bkmc->bmnk", q, k)
-        aw = aw / (self.hc**0.5)
+        aw = aw / (self.hc ** 0.5)
         aw = F.softmax(aw, dim=-1)
 
         x = torch.einsum("bmnk,bkmc->bnmc", aw, v)
@@ -705,27 +706,29 @@ class CBFuse(nn.Module):
 class ChannelAttention(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttention, self).__init__()
-        self.avg_pool= nn.AdaptiveAvgPool2d(1)
-        self.max_pool= nn.AdaptiveMaxPool2d(1)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
 
-        self.fc1= nn.Conv2d(in_planes, in_planes//ratio, 1, bias=False)
-        self.relu1= nn.ReLU()
-        self.fc2= nn.Conv2d(in_planes//ratio, in_planes, 1, bias=False)
-        self.sigmoid= nn.Sigmoid()
+        self.fc1 = nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False)
+        self.relu1 = nn.ReLU()
+        self.fc2 = nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False)
+        self.sigmoid = nn.Sigmoid()
 
-    def forward(self,x):
-        avg_out= self.fc2(self.relu1(self.fc1(self.avg_pool(x))))
-        max_out= self.fc2(self.relu1(self.fc1(self.max_pool(x))))
-        out= avg_out + max_out
+    def forward(self, x):
+        avg_out = self.fc2(self.relu1(self.fc1(self.avg_pool(x))))
+        max_out = self.fc2(self.relu1(self.fc1(self.max_pool(x))))
+        out = avg_out + max_out
         return self.sigmoid(out)
+
 
 class SpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
-        super(SpatialAttention,self).__init__()
-        self.conv1= nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)  # kernel size = 7 Padding is 3: (n - 7 + 1) + 2P = n
-        self.sigmoid= nn.Sigmoid()
+        super(SpatialAttention, self).__init__()
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2,
+                               bias=False)  # kernel size = 7 Padding is 3: (n - 7 + 1) + 2P = n
+        self.sigmoid = nn.Sigmoid()
 
-    def forward(self,x):
+    def forward(self, x):
         avg_out = torch.mean(x, dim=1, keepdim=True)
         max_out, _ = torch.max(x, dim=1, keepdim=True)
         x = torch.cat([avg_out, max_out], dim=1)
@@ -753,7 +756,6 @@ def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1):
     result.add_module('bn', nn.BatchNorm2d(num_features=out_channels))
 
     return result
-
 
 
 class RepVGGBlock(nn.Module):
@@ -894,7 +896,7 @@ class h_swish(nn.Module):
 
 
 class CoordAtt(nn.Module):
-    def __init__(self, inp, oup, reduction=32):
+    def __init__(self, inp, oup, reduction=32, use_ca=True):
         super(CoordAtt, self).__init__()
         self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
         self.pool_w = nn.AdaptiveAvgPool2d((1, None))
@@ -908,7 +910,9 @@ class CoordAtt(nn.Module):
         self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
         self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x):
+        self.use_ca = use_ca
+
+    def forward_ca(self, x):
         identity = x
 
         n, c, h, w = x.size()
@@ -928,4 +932,26 @@ class CoordAtt(nn.Module):
 
         out = identity * a_w * a_h
 
+        return out
+
+    def forward(self, x):
+        return self.forward_ca(x) if self.use_ca else x
+
+
+
+class StemBlock(nn.Module):
+    def __init__(self, c1, c2, k=3, s=2, p=None, g=1, act=True):
+        super(StemBlock, self).__init__()
+        self.stem_1 = Conv(c1, c2, k=k, s=s, p=p, g=g, act=act)
+        self.stem_2a = Conv(c2, c2 // 2, 1, 1, 0)
+        self.stem_2b = Conv(c2 // 2, c2, 3, 2, 1)
+        self.stem_2p = nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)
+        self.stem_3 = Conv(c2 * 2, c2, 1, 1, 0)
+
+    def forward(self, x):
+        stem_1_out = self.stem_1(x)
+        stem_2a_out = self.stem_2a(stem_1_out)
+        stem_2b_out = self.stem_2b(stem_2a_out)
+        stem_2p_out = self.stem_2p(stem_1_out)
+        out = self.stem_3(torch.cat((stem_2b_out, stem_2p_out), 1))
         return out

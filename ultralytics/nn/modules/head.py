@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
-from .block import DFL, Proto, ContrastiveHead, BNContrastiveHead
+from .block import DFL, Proto, ContrastiveHead, BNContrastiveHead, CoordAtt
 from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
@@ -25,7 +25,7 @@ class Detect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, ch=()):
+    def __init__(self, nc=80, use_ca=False, ch=()):
         """Initializes the YOLOv8 detection layer with specified number of classes and channels."""
         super().__init__()
         self.nc = nc  # number of classes
@@ -35,9 +35,12 @@ class Detect(nn.Module):
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
+            nn.Sequential(Conv(x, c2, 3), CoordAtt(c2, c2, use_ca=use_ca), Conv(c2, c2, 3),
+                          nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
         )
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(x, c3, 3), CoordAtt(c3, c3, use_ca=use_ca), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1))
+            for x in ch)
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def forward(self, x):

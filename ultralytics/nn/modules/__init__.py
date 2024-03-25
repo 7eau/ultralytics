@@ -49,6 +49,7 @@ from .block import (
     CBAM,
     MobileNetV3_Block,
     CoordAtt,
+    StemBlock,
 )
 from .conv import (
     CBAM,
@@ -141,4 +142,5 @@ __all__ = (
     "CBAM",
     "MobileNetV3_Block",
     "CoordAtt",
+    "StemBlock",
 )
